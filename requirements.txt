@@ -1,0 +1,10 @@
+streamlit
+pandas
+plotly
+requests
+python-dotenv
+PublicDataReader
+xmltodict
+beautifulsoup4
+google-generativeai
+python-docx
