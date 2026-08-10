@@ -446,12 +446,28 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-@st.cache_data(ttl=1800)
-def cached_indicator_status(ind):
-    return db_init.get_indicator_status(ind)
+@st.cache_resource
+def get_status_store():
+    """모든 방문자가 공유하는 지표별 상태 저장소 (앱이 떠있는 동안 유지, 지표별로 개별 갱신 가능)"""
+    return {}
+
+status_store = get_status_store()
+
+# 아직 한 번도 확인 안 된 지표만 골라서 병렬로 확인 (이미 있는 지표는 그대로 재사용)
+_missing = [ind for ind in INDICATORS if ind not in status_store]
+if _missing:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(_missing)) as executor:
+        futures = {executor.submit(db_init.get_indicator_status, ind): ind for ind in _missing}
+        for future in futures:
+            ind = futures[future]
+            try:
+                status_store[ind] = future.result(timeout=60)
+            except Exception as e:
+                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
 
 for ind in INDICATORS:
-    status = cached_indicator_status(ind)
+    status = status_store[ind]
     db_latest = status["db_latest"]
     expected = status["expected"]
     is_current = status["is_current"]
@@ -497,7 +513,8 @@ for ind in INDICATORS:
                     env=child_env
                 )
             if result.returncode == 0:
-                st.cache_data.clear()
+                status_store.pop(ind, None)  # 이 지표만 저장소에서 제거 → 다음 렌더링 때 이 지표만 새로 확인됨
+                st.cache_data.clear()  # 차트/표용 로컬 DB 조회 캐시는 가벼우니 그냥 전체 새로고침
                 st.session_state["update_error"] = None
                 already_current = "이미 최신 상태" in (result.stdout or "")
                 st.session_state["update_success"] = {"ind": ind, "already_current": already_current}
