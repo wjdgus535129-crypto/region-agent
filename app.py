@@ -93,6 +93,7 @@ st.markdown("""
     .badge-ok { background: rgba(34,197,94,0.15); color: #22c55e; }
     .badge-warn { background: rgba(245,158,11,0.15); color: #f59e0b; }
     .badge-na { background: rgba(139,143,168,0.15); color: #8b8fa8; }
+    .badge-err { background: rgba(239,68,68,0.15); color: #ef4444; }
     .status-note { color: #8b8fa8; font-size: 0.78rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -456,21 +457,30 @@ status_store = get_status_store()
 # 아직 한 번도 확인 안 된 지표만 골라서 병렬로 확인 (이미 있는 지표는 그대로 재사용)
 _missing = [ind for ind in INDICATORS if ind not in status_store]
 if _missing:
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=len(_missing)) as executor:
         futures = {executor.submit(db_init.get_indicator_status, ind): ind for ind in _missing}
-        for future in futures:
-            ind = futures[future]
-            try:
-                status_store[ind] = future.result(timeout=60)
-            except Exception as e:
-                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
+        # as_completed: 제출 순서가 아니라 '먼저 끝난 것부터' 처리한다.
+        # -> 지표 하나가 느려도(네트워크 지연 등), 이미 끝난 다른 지표들이 그 뒤에서 줄서서 기다리지 않는다.
+        try:
+            for future in as_completed(futures, timeout=130):
+                ind = futures[future]
+                try:
+                    status_store[ind] = future.result()
+                except Exception as e:
+                    status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
+        except Exception:
+            pass  # 전체 대기시간(130초)을 넘긴 경우 - 아래에서 남은 지표를 '확인 실패'로 채워 화면이 영영 비지 않게 함
+        for ind in _missing:
+            if ind not in status_store:
+                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": "시간 초과"}
 
 for ind in INDICATORS:
     status = status_store[ind]
     db_latest = status["db_latest"]
     expected = status["expected"]
     is_current = status["is_current"]
+    error = status.get("error")
 
     if ind == "노후도":
         db_disp = db_latest if db_latest else "-"
@@ -479,7 +489,9 @@ for ind in INDICATORS:
     else:
         db_disp = fmt_ym(db_latest)
         expected_disp = fmt_ym(expected)
-        if is_current:
+        if error:
+            badge_html = '<span class="badge badge-err">확인 실패</span>'
+        elif is_current:
             badge_html = '<span class="badge badge-ok">최신</span>'
         else:
             badge_html = '<span class="badge badge-warn">업데이트 필요</span>'
@@ -494,7 +506,10 @@ for ind in INDICATORS:
     with c4:
         st.markdown(f'<div class="status-row">{badge_html}</div>', unsafe_allow_html=True)
     with c5:
-        st.markdown(f'<div class="status-row"><span class="status-note">{RELEASE_NOTE.get(ind,"")}</span></div>', unsafe_allow_html=True)
+        note = RELEASE_NOTE.get(ind, "")
+        if error:
+            note = f"⚠ 최신월 확인 실패 (네트워크 문제로 추정) — '업데이트'로 재시도 가능"
+        st.markdown(f'<div class="status-row"><span class="status-note">{note}</span></div>', unsafe_allow_html=True)
     with c6:
         btn_label = "🔄 갱신" if ind == "노후도" else "🔄 업데이트"
         btn_disabled = not st.session_state.is_admin
@@ -1017,3 +1032,4 @@ if run_analysis:
         except Exception as e:
             st.error(f"분석 중 오류 발생: {e}")
             st.info(".env 파일에 GEMINI_API_KEY가 올바르게 설정되어 있는지 확인해주세요.")
+

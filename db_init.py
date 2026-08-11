@@ -15,6 +15,18 @@ MOLIT_KEY = os.environ.get("MOLIT_KEY", "")
 DATA_KEY = os.environ.get("DATA_KEY", "")
 KOSIS_KEY = os.environ.get("KOSIS_KEY", "")  # kosis.kr/openapi 발급 키 (노후도 지역코드 목록 조회 전용)
 
+# ===== 네트워크 타임아웃 =====
+# probe(상태 확인)는 페이지 로딩을 막으므로 너무 길면 안 되지만,
+# 너무 짧으면 해외 서버 -> 국내 공공 API 왕복 시 정상 응답도 놓칠 수 있어 넉넉하게 잡는다.
+PROBE_TIMEOUT = 20      # 최신월 확인용 (가벼운 조회)
+FETCH_TIMEOUT = 30      # 실제 데이터 수집용 (관리자가 버튼 눌러서 기다리는 상황이라 더 여유있게)
+
+
+class NetworkFailure(Exception):
+    """진짜 '데이터 없음'이 아니라 네트워크/서버 문제로 확인 자체에 실패했음을 구분하기 위한 예외"""
+    pass
+
+
 # ===== 전월 기준 =====
 def get_month_range(months=12):
     now = datetime.now()
@@ -68,11 +80,16 @@ def init_db():
     print("✅ DB 초기화 완료")
 
 # ===== 통계누리 API =====
-def fetch_molit(form_id, style_num, start_dt, end_dt):
+def fetch_molit(form_id, style_num, start_dt, end_dt, timeout=FETCH_TIMEOUT):
     url = "http://stat.molit.go.kr/portal/openapi/service/rest/getList.do"
     params = {"key": MOLIT_KEY, "form_id": form_id, "style_num": style_num,
               "start_dt": start_dt, "end_dt": end_dt}
-    res = requests.get(url, params=params)
+    try:
+        res = requests.get(url, params=params, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        # 타임아웃/연결실패 등 네트워크 문제 - "데이터가 없다"와는 다른 상황이므로 구분해서 던진다
+        print(f"  ⚠ fetch_molit 네트워크 오류 (form_id={form_id}, {start_dt}~{end_dt}): {e}")
+        raise NetworkFailure(str(e)) from e
     try:
         return res.json()["result_data"]["formList"]
     except (KeyError, ValueError) as e:
@@ -213,7 +230,7 @@ def save_인구(start_dt, end_dt):
                 "numOfRows": "900", "pageNo": "1"
             }
             try:
-                res = requests.get(url, params=params, timeout=10)
+                res = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
                 data = res.json()
                 items = data.get("Response", {}).get("items", {})
                 if not items or isinstance(items, str):
@@ -247,7 +264,7 @@ def save_인구(start_dt, end_dt):
             "numOfRows": "50", "pageNo": "1"
         }
         try:
-            res = requests.get(url, params=params, timeout=10)
+            res = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
             data = res.json()
             items = data.get("Response", {}).get("items", {})
             if not items or isinstance(items, str):
@@ -276,12 +293,6 @@ def save_인구(start_dt, end_dt):
     print(f"✅ 인구 {count}건 저장 완료")
 
 # ===== 노후도 =====
-# DT_1JU1520 테이블은 지역(C1)/연면적(C2)/주택종류(C3) 축만 있고,
-# 건축연도는 itmId(항목) 쪽에 들어있음이 확인됨:
-#   T000=주택_계, T070=2005~2009, T080=2000~2004, T090=1990~1999,
-#   T100=1980~1989, T110=1979년 이전, T2010~T2024=해당 연도(개별)
-# 지역(objL1)은 5자리 시군구 코드를 하나씩 넣어야 값이 나오므로,
-# PublicDataReader 패키지로 전국 시군구 코드 목록을 받아와 순회 호출한다.
 def save_노후도():
     url = "https://apis.data.go.kr/1240000/statisticsData/getStatisticsData"
     conn = sqlite3.connect("pf_data.db")
@@ -301,8 +312,6 @@ def save_노후도():
         conn.close()
         return
 
-    # 행정안전부 법정동코드가 아니라, 이 통계표(DT_1JU1520)가 실제로 쓰는
-    # KOSIS 내부 지역코드를 메타정보 API로 직접 받아온다 (둘은 서로 다른 코드체계임)
     try:
         kosis_api = pdr.Kosis(KOSIS_KEY)
         meta_df = kosis_api.get_data(
@@ -338,7 +347,7 @@ def save_노후도():
             "itmId": "ALL", "prdSe": "Y", "newEstPrdCnt": "1", "format": "json"
         }
         try:
-            res = requests.get(url, params=params, timeout=15)
+            res = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
             data = res.json()
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
             if isinstance(items, dict):
@@ -408,7 +417,7 @@ def save_청약경쟁률(start_dt, end_dt):
         "cond[STAT_DE::LTE]": end_dt,
     }
 
-    res = requests.get(url, params=params)
+    res = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
     data = res.json()
     items = data.get("data", [])
 
@@ -429,58 +438,69 @@ def save_청약경쟁률(start_dt, end_dt):
 
 # ===== 롤링 업데이트 (개별 지표, 최신 1개월 추가 + 최고령 1개월 삭제) =====
 def probe_month(cfg, ym):
-    """해당 지표의 특정 월(ym) 데이터가 실제로 공표되어 있는지 가볍게 확인만 한다 (저장 안 함)"""
+    """해당 지표의 특정 월(ym) 데이터가 실제로 공표되어 있는지 가볍게 확인만 한다 (저장 안 함).
+    반환값: True(있음) / False(정상 응답을 받았는데 데이터가 없음) / NetworkFailure 예외(확인 자체 실패)"""
     table = cfg["table"]
-    try:
-        if table in ("미분양", "인허가", "착공", "준공"):
-            items = fetch_molit(cfg["form_id"], cfg["style_num"], ym, ym)
-            return len(items) > 0
-        elif table == "인구":
-            # 서울(1100000000)을 대표로 확인 - 인구 통계는 전국 동시 공표라 대표성 있음
-            url = "https://apis.data.go.kr/1741000/admmPpltnHhStus/selectAdmmPpltnHhStus"
-            params = {
-                "serviceKey": DATA_KEY, "admmCd": "1100000000",
-                "srchFrYm": ym, "srchToYm": ym,
-                "lv": "2", "regSeCd": "1", "type": "json",
-                "numOfRows": "5", "pageNo": "1"
-            }
-            res = requests.get(url, params=params, timeout=10)
-            data = res.json()
-            items = data.get("Response", {}).get("items", {})
-            if not items or isinstance(items, str):
-                return False
-            item_list = items.get("item", [])
-            if isinstance(item_list, dict):
-                item_list = [item_list]
-            return len(item_list) > 0
-        elif table == "청약경쟁률":
-            url = "https://api.odcloud.kr/api/ApplyhomeStatSvc/v1/getAPTCmpetrtAreaStat"
-            params = {
-                "serviceKey": DATA_KEY, "page": "1", "perPage": "5",
-                "returnType": "json",
-                "cond[STAT_DE::GTE]": ym, "cond[STAT_DE::LTE]": ym + "31",
-            }
-            res = requests.get(url, params=params, timeout=10)
-            data = res.json()
-            return len(data.get("data", [])) > 0
-    except Exception:
-        return False
+    if table in ("미분양", "인허가", "착공", "준공"):
+        items = fetch_molit(cfg["form_id"], cfg["style_num"], ym, ym, timeout=PROBE_TIMEOUT)
+        return len(items) > 0
+    elif table == "인구":
+        # 서울(1100000000)을 대표로 확인 - 인구 통계는 전국 동시 공표라 대표성 있음
+        url = "https://apis.data.go.kr/1741000/admmPpltnHhStus/selectAdmmPpltnHhStus"
+        params = {
+            "serviceKey": DATA_KEY, "admmCd": "1100000000",
+            "srchFrYm": ym, "srchToYm": ym,
+            "lv": "2", "regSeCd": "1", "type": "json",
+            "numOfRows": "5", "pageNo": "1"
+        }
+        try:
+            res = requests.get(url, params=params, timeout=PROBE_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            raise NetworkFailure(str(e)) from e
+        data = res.json()
+        items = data.get("Response", {}).get("items", {})
+        if not items or isinstance(items, str):
+            return False
+        item_list = items.get("item", [])
+        if isinstance(item_list, dict):
+            item_list = [item_list]
+        return len(item_list) > 0
+    elif table == "청약경쟁률":
+        url = "https://api.odcloud.kr/api/ApplyhomeStatSvc/v1/getAPTCmpetrtAreaStat"
+        params = {
+            "serviceKey": DATA_KEY, "page": "1", "perPage": "5",
+            "returnType": "json",
+            "cond[STAT_DE::GTE]": ym, "cond[STAT_DE::LTE]": ym + "31",
+        }
+        try:
+            res = requests.get(url, params=params, timeout=PROBE_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            raise NetworkFailure(str(e)) from e
+        data = res.json()
+        return len(data.get("data", [])) > 0
     return False
 
 def find_latest_available_month(cfg, initial_guess, max_back=4):
     """initial_guess부터 시작해서 실제로 데이터가 있는 가장 최신월을 찾을 때까지 한 달씩 뒤로 물러난다.
-    다 실패하면 initial_guess를 그대로 반환(최소한 화면에 뭔가는 보여주기 위함)"""
+    - 정상 응답인데 데이터가 없는 경우(False)에만 계속 물러난다.
+    - 네트워크 문제로 확인 자체가 실패(NetworkFailure)하면, 같은 이유로 계속 실패할 가능성이 높으므로
+      즉시 멈추고 '확인 실패'를 리턴한다 (같은 지연을 max_back번 반복해서 낭비하지 않기 위함)."""
     d = datetime.strptime(initial_guess, "%Y%m")
     for _ in range(max_back + 1):
         candidate = d.strftime("%Y%m")
-        if probe_month(cfg, candidate):
-            return candidate
+        try:
+            if probe_month(cfg, candidate):
+                return candidate, None
+        except NetworkFailure as e:
+            return None, str(e)
         d = datetime(d.year, d.month, 1) - timedelta(days=2)
         d = datetime(d.year, d.month, 1)
-    return initial_guess
+    # 다 물러나봤는데도 데이터를 못 찾음 (네트워크 문제는 아니고, 정말 최신 공표가 초기 추정치보다 더 이전)
+    return initial_guess, None
 
 def get_expected_latest_month(cfg):
-    """지표별 대략적인 공개 지연(lag_days)을 초기 추정치로 삼고, 실제 존재 여부를 확인해가며 보정한다"""
+    """지표별 대략적인 공개 지연(lag_days)을 초기 추정치로 삼고, 실제 존재 여부를 확인해가며 보정한다.
+    반환값: (expected_ym 또는 None, error 메시지 또는 None)"""
     now = datetime.now()
     initial = datetime(now.year, now.month, 1) - timedelta(days=cfg["lag_days"])
     return find_latest_available_month(cfg, initial.strftime("%Y%m"))
@@ -489,7 +509,9 @@ def rolling_update(cfg, keep_months=12):
     """실제 존재가 확인된 최신월 데이터가 DB에 없으면 수집해서 추가하고,
     keep_months개월을 초과하는 오래된 월은 삭제해 항상 최근 N개월 창을 유지한다."""
     table = cfg["table"]
-    expected_ym = get_expected_latest_month(cfg)
+    expected_ym, err = get_expected_latest_month(cfg)
+    if expected_ym is None:
+        raise RuntimeError(f"{table}: 최신월 확인 실패 (네트워크 문제) - {err}")
 
     conn = sqlite3.connect("pf_data.db")
     cur = conn.cursor()
@@ -526,25 +548,28 @@ ROLLING_CONFIG = {
 }
 
 def get_indicator_status(indicator):
-    """앱 화면의 상태 테이블용: DB 최신월, 실제 공표된 최신월, 최신여부를 반환"""
+    """앱 화면의 상태 테이블용: DB 최신월, 실제 공표된 최신월, 최신여부를 반환.
+    네트워크 문제로 확인 자체가 실패하면 error 필드에 사유가 담긴다 (expected는 None)."""
     if indicator == "노후도":
         conn = sqlite3.connect("pf_data.db")
         cur = conn.cursor()
         cur.execute("SELECT MAX(year) FROM 노후도")
         db_latest = cur.fetchone()[0]
         conn.close()
-        return {"db_latest": db_latest, "expected": None, "is_current": None}
+        return {"db_latest": db_latest, "expected": None, "is_current": None, "error": None}
 
     cfg = ROLLING_CONFIG.get(indicator)
     if not cfg:
-        return {"db_latest": None, "expected": None, "is_current": None}
+        return {"db_latest": None, "expected": None, "is_current": None, "error": "알 수 없는 지표"}
     conn = sqlite3.connect("pf_data.db")
     cur = conn.cursor()
     cur.execute(f"SELECT MAX(date) FROM {cfg['table']}")
     db_latest = cur.fetchone()[0]
     conn.close()
-    expected = get_expected_latest_month(cfg)
-    return {"db_latest": db_latest, "expected": expected, "is_current": (db_latest == expected)}
+    expected, err = get_expected_latest_month(cfg)
+    if expected is None:
+        return {"db_latest": db_latest, "expected": None, "is_current": None, "error": err}
+    return {"db_latest": db_latest, "expected": expected, "is_current": (db_latest == expected), "error": None}
 
 def run_rolling_update(indicator):
     if indicator == "노후도":
