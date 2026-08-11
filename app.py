@@ -505,7 +505,7 @@ for ind in INDICATORS:
         elif IS_CLOUD:
             note = RELEASE_NOTE.get(ind, "") + " · 데이터 갱신은 로컬 PC에서 진행 후 push"
         else:
-            note = RELEASE_NOTE.get(ind, "") + " · '업데이트'를 눌러야 최신 여부를 확인해요"
+            note = RELEASE_NOTE.get(ind, "") + " · '업데이트'를 눌러서 최신 여부를 확인하세요"
         st.markdown(f'<div class="status-row"><span class="status-note">{note}</span></div>', unsafe_allow_html=True)
     with c6:
         if IS_CLOUD:
