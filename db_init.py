@@ -90,9 +90,23 @@ def fetch_molit(form_id, style_num, start_dt, end_dt, timeout=FETCH_TIMEOUT):
         # 타임아웃/연결실패 등 네트워크 문제 - "데이터가 없다"와는 다른 상황이므로 구분해서 던진다
         print(f"  ⚠ fetch_molit 네트워크 오류 (form_id={form_id}, {start_dt}~{end_dt}): {e}")
         raise NetworkFailure(str(e)) from e
+
     try:
-        return res.json()["result_data"]["formList"]
-    except (KeyError, ValueError) as e:
+        data = res.json()
+    except ValueError as e:
+        print(f"  ⚠ fetch_molit 응답이 JSON이 아님 (form_id={form_id}, {start_dt}~{end_dt}): {e}")
+        raise NetworkFailure(f"JSON 파싱 실패: {e}") from e
+
+    # "해당 기간에 데이터가 없습니다" 같은 정상 응답(INFO-200)은 오류가 아니라
+    # 그냥 그 달엔 아직 자료가 공표되지 않았다는 뜻이므로, 빈 리스트로 정상 처리한다
+    # (probe_month가 이걸 받아서 한 달 물러나 재시도하도록 - NetworkFailure로 취급하면 안 됨)
+    status_code = data.get("result_status", {}).get("status_code", "")
+    if status_code == "INFO-200":
+        return []
+
+    try:
+        return data["result_data"]["formList"]
+    except (KeyError, TypeError) as e:
         print(f"  ⚠ fetch_molit 응답 이상 (form_id={form_id}, {start_dt}~{end_dt}): {e}")
         print(f"  응답 원문: {res.text[:1000]}")
         raise
