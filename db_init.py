@@ -442,7 +442,12 @@ def probe_month(cfg, ym):
     반환값: True(있음) / False(정상 응답을 받았는데 데이터가 없음) / NetworkFailure 예외(확인 자체 실패)"""
     table = cfg["table"]
     if table in ("미분양", "인허가", "착공", "준공"):
-        items = fetch_molit(cfg["form_id"], cfg["style_num"], ym, ym, timeout=PROBE_TIMEOUT)
+        try:
+            items = fetch_molit(cfg["form_id"], cfg["style_num"], ym, ym, timeout=PROBE_TIMEOUT)
+        except Exception as e:
+            # NetworkFailure(연결 문제)뿐 아니라 JSON 파싱 오류 등 예상 못한 응답 형식도
+            # 전부 '확인 실패'로 통일해서, 상위(find_latest_available_month)가 놓치지 않게 한다
+            raise NetworkFailure(str(e)) from e
         return len(items) > 0
     elif table == "인구":
         # 서울(1100000000)을 대표로 확인 - 인구 통계는 전국 동시 공표라 대표성 있음
@@ -566,7 +571,12 @@ def get_indicator_status(indicator):
     cur.execute(f"SELECT MAX(date) FROM {cfg['table']}")
     db_latest = cur.fetchone()[0]
     conn.close()
-    expected, err = get_expected_latest_month(cfg)
+    # db_latest는 이미 확보했으니, 이 아래 네트워크 확인 과정에서 '어떤' 예외가 나더라도
+    # (NetworkFailure든 예상 못한 다른 예외든) db_latest만큼은 절대 잃어버리지 않는다.
+    try:
+        expected, err = get_expected_latest_month(cfg)
+    except Exception as e:
+        return {"db_latest": db_latest, "expected": None, "is_current": None, "error": str(e)}
     if expected is None:
         return {"db_latest": db_latest, "expected": None, "is_current": None, "error": err}
     return {"db_latest": db_latest, "expected": expected, "is_current": (db_latest == expected), "error": None}
