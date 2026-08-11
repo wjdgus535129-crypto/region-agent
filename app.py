@@ -447,6 +447,9 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+STATUS_TTL_SECONDS = 6 * 3600  # 6시간 - 이 시간이 지나면 다음 방문자가 들어올 때 자동으로 재확인됨
+                                 # (GitHub Actions 잠자기 방지가 6시간마다 접속하도록 설정되면, 사실상 6시간마다 자동 갱신되는 셈)
+
 @st.cache_resource
 def get_status_store():
     """모든 방문자가 공유하는 지표별 상태 저장소 (앱이 떠있는 동안 유지, 지표별로 개별 갱신 가능)"""
@@ -454,8 +457,12 @@ def get_status_store():
 
 status_store = get_status_store()
 
-# 아직 한 번도 확인 안 된 지표만 골라서 병렬로 확인 (이미 있는 지표는 그대로 재사용)
-_missing = [ind for ind in INDICATORS if ind not in status_store]
+# 아직 한 번도 확인 안 됐거나, 확인한 지 STATUS_TTL_SECONDS가 지난 지표를 골라서 병렬로 재확인
+_now = datetime.now().timestamp()
+_missing = [
+    ind for ind in INDICATORS
+    if ind not in status_store or (_now - status_store[ind].get("checked_at", 0)) > STATUS_TTL_SECONDS
+]
 if _missing:
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=len(_missing)) as executor:
@@ -466,14 +473,16 @@ if _missing:
             for future in as_completed(futures, timeout=130):
                 ind = futures[future]
                 try:
-                    status_store[ind] = future.result()
+                    result = future.result()
                 except Exception as e:
-                    status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
+                    result = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
+                result["checked_at"] = _now
+                status_store[ind] = result
         except Exception:
             pass  # 전체 대기시간(130초)을 넘긴 경우 - 아래에서 남은 지표를 '확인 실패'로 채워 화면이 영영 비지 않게 함
         for ind in _missing:
-            if ind not in status_store:
-                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": "시간 초과"}
+            if ind not in status_store or status_store[ind].get("checked_at") != _now:
+                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": "시간 초과", "checked_at": _now}
 
 for ind in INDICATORS:
     status = status_store[ind]
