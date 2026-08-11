@@ -18,8 +18,8 @@ KOSIS_KEY = os.environ.get("KOSIS_KEY", "")  # kosis.kr/openapi 발급 키 (노�
 # ===== 네트워크 타임아웃 =====
 # probe(상태 확인)는 페이지 로딩을 막으므로 너무 길면 안 되지만,
 # 너무 짧으면 해외 서버 -> 국내 공공 API 왕복 시 정상 응답도 놓칠 수 있어 넉넉하게 잡는다.
-PROBE_TIMEOUT = 20      # 최신월 확인용 (가벼운 조회)
-FETCH_TIMEOUT = 30      # 실제 데이터 수집용 (관리자가 버튼 눌러서 기다리는 상황이라 더 여유있게)
+PROBE_TIMEOUT = 90      # 최신월 확인용 - 정부 서버가 느릴 수 있어 넉넉하게
+FETCH_TIMEOUT = 90      # 실제 데이터 수집용 - 마찬가지로 넉넉하게
 
 
 class NetworkFailure(Exception):

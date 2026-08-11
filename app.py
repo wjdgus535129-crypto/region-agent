@@ -433,10 +433,6 @@ RELEASE_NOTE = {
     "노후도": "KOSIS 인구주택총조사 · 연 1회(보통 하반기) 공표",
 }
 INDICATORS = ["미분양", "인허가", "착공", "준공", "인구", "청약경쟁률", "노후도"]
-MOLIT_INDICATORS = ("미분양", "인허가", "착공", "준공")
-# Streamlit Community Cloud는 앱을 /mount/src/<repo명> 경로에 배치함 - 로컬 PC엔 이 경로가 없으므로
-# 이걸로 "지금 클라우드에서 돌고 있는지"를 판별한다 (국토부 서버가 클라우드 IP를 차단하기 때문)
-IS_CLOUD = os.path.exists("/mount/src")
 
 def fmt_ym(ym):
     if not ym:
@@ -512,23 +508,12 @@ for ind in INDICATORS:
     with c5:
         note = RELEASE_NOTE.get(ind, "")
         if error:
-            if ind in ("미분양", "인허가", "착공", "준공"):
-                note = "🚫 국토부 서버가 클라우드 IP를 차단 — 로컬 PC에서 'python db_init.py --update' 실행 후 pf_data.db를 git push 해주세요"
-            else:
-                note = "⚠ 최신월 확인 실패 (일시적 네트워크 문제로 추정) — '업데이트'로 재시도 가능"
+            note = "⚠ 최신월 확인 실패 (정부 서버 응답 지연으로 추정) — '업데이트'로 재시도 가능"
         st.markdown(f'<div class="status-row"><span class="status-note">{note}</span></div>', unsafe_allow_html=True)
     with c6:
         btn_label = "🔄 갱신" if ind == "노후도" else "🔄 업데이트"
-        cloud_blocked = IS_CLOUD and ind in MOLIT_INDICATORS
-        if cloud_blocked:
-            btn_label = "🔒 로컬 전용"
-        btn_disabled = (not st.session_state.is_admin) or cloud_blocked
-        if cloud_blocked:
-            help_text = "국토부 서버가 클라우드 IP를 차단해서 여기서는 업데이트가 안 돼요. 로컬 PC에서 실행 후 pf_data.db를 push 해주세요."
-        elif st.session_state.is_admin:
-            help_text = None
-        else:
-            help_text = "관리자만 클릭할 수 있어요. 위 '관리자 로그인'에서 인증해주세요."
+        btn_disabled = not st.session_state.is_admin
+        help_text = None if st.session_state.is_admin else "관리자만 클릭할 수 있어요. 위 '관리자 로그인'에서 인증해주세요."
         clicked = st.button(
             btn_label, key=f"update_{ind}", use_container_width=True,
             disabled=btn_disabled,
