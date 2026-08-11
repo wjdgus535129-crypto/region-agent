@@ -76,7 +76,7 @@ st.markdown("""
 
     /* 지표 업데이트 상태 테이블 */
     .status-table-header {
-        display: grid; grid-template-columns: 1.1fr 1fr 1fr 0.9fr 1.6fr 0.9fr;
+        display: grid; grid-template-columns: 1.2fr 1fr 0.9fr 2.2fr 1.1fr;
         gap: 8px; padding: 8px 14px; font-size: 0.72rem; color: #8b8fa8;
         border-bottom: 1px solid #2a2d3e; letter-spacing: 0.3px;
     }
@@ -416,7 +416,20 @@ with st.expander("🔐 관리자 로그인" if not st.session_state.is_admin els
 
 # ===== 지표별 데이터 현황 & 업데이트 =====
 st.markdown('<div class="section-title">🔄 지표별 데이터 현황</div>', unsafe_allow_html=True)
-if not st.session_state.is_admin:
+
+# Streamlit Community Cloud는 앱을 /mount/src/<repo명> 경로에 배치함 - 로컬 PC엔 이 경로가 없음.
+# 정부 API가 클라우드에서 접속할 땐 응답 속도가 들쭉날쭉해서 (되다 안되다 함), 클라우드에서는
+# 아예 네트워크를 안 타는 게 가장 안정적이라 판단 - 데이터 갱신은 항상 로컬에서 진행 후
+# pf_data.db를 push하는 방식으로 통일한다. 클라우드 앱은 로컬 DB 값만 즉시 보여주는 조회 전용.
+IS_CLOUD = os.path.exists("/mount/src")
+
+if IS_CLOUD:
+    st.markdown(
+        "<span style='color:#8b8fa8; font-size:0.82rem'>"
+        "아래는 각 지표의 최신 데이터 현황이에요. 이 화면은 조회 전용이고, 데이터 갱신은 관리자가 로컬 PC에서 진행해요.</span>",
+        unsafe_allow_html=True
+    )
+elif not st.session_state.is_admin:
     st.markdown(
         "<span style='color:#8b8fa8; font-size:0.82rem'>"
         "아래는 각 지표의 최신 데이터 현황이에요. 데이터 업데이트는 관리자만 가능해요.</span>",
@@ -442,114 +455,96 @@ def fmt_ym(ym):
 
 st.markdown(
     '<div class="status-table-header">'
-    '<div>지표</div><div>DB 최신</div><div>제공처 예상 최신</div>'
-    '<div>상태</div><div>다음 공개 예정</div><div>업데이트</div></div>',
+    '<div>지표</div><div>DB 최신</div>'
+    '<div>상태</div><div>안내</div><div>업데이트</div></div>',
     unsafe_allow_html=True
 )
 
-STATUS_TTL_SECONDS = 6 * 3600  # 6시간 - 이 시간이 지나면 다음 방문자가 들어올 때 자동으로 재확인됨
-                                 # (GitHub Actions 잠자기 방지가 6시간마다 접속하도록 설정되면, 사실상 6시간마다 자동 갱신되는 셈)
-
 @st.cache_resource
 def get_status_store():
-    """모든 방문자가 공유하는 지표별 상태 저장소 (앱이 떠있는 동안 유지, 지표별로 개별 갱신 가능)"""
-    return {}
+    """모든 방문자가 공유하는 지표별 상태 저장소 (앱이 떠있는 동안 유지).
+    로컬 DB 조회 결과만 즉시 채워넣는다 (네트워크 호출 전혀 없음 → 누가 접속해도 항상 즉시 뜸).
+    '최신 여부 확인'은 로컬 PC에서 관리자가 업데이트 버튼을 눌렀을 때만 정부 서버에 접속해서 이뤄진다."""
+    return {ind: {"db_latest": db_init.get_db_latest(ind), "checked": False, "error": None}
+            for ind in INDICATORS}
 
 status_store = get_status_store()
-
-# 아직 한 번도 확인 안 됐거나, 확인한 지 STATUS_TTL_SECONDS가 지난 지표를 골라서 병렬로 재확인
-_now = datetime.now().timestamp()
-_missing = [
-    ind for ind in INDICATORS
-    if ind not in status_store or (_now - status_store[ind].get("checked_at", 0)) > STATUS_TTL_SECONDS
-]
-if _missing:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=len(_missing)) as executor:
-        futures = {executor.submit(db_init.get_indicator_status, ind): ind for ind in _missing}
-        # as_completed: 제출 순서가 아니라 '먼저 끝난 것부터' 처리한다.
-        # -> 지표 하나가 느려도(네트워크 지연 등), 이미 끝난 다른 지표들이 그 뒤에서 줄서서 기다리지 않는다.
-        try:
-            for future in as_completed(futures, timeout=130):
-                ind = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = {"db_latest": None, "expected": None, "is_current": None, "error": str(e)}
-                result["checked_at"] = _now
-                status_store[ind] = result
-        except Exception:
-            pass  # 전체 대기시간(130초)을 넘긴 경우 - 아래에서 남은 지표를 '확인 실패'로 채워 화면이 영영 비지 않게 함
-        for ind in _missing:
-            if ind not in status_store or status_store[ind].get("checked_at") != _now:
-                status_store[ind] = {"db_latest": None, "expected": None, "is_current": None, "error": "시간 초과", "checked_at": _now}
 
 for ind in INDICATORS:
     status = status_store[ind]
     db_latest = status["db_latest"]
-    expected = status["expected"]
-    is_current = status["is_current"]
+    checked = status["checked"]
     error = status.get("error")
 
     if ind == "노후도":
         db_disp = db_latest if db_latest else "-"
-        expected_disp = "-"
         badge_html = '<span class="badge badge-na">연단위</span>'
     else:
         db_disp = fmt_ym(db_latest)
-        expected_disp = fmt_ym(expected)
         if error:
             badge_html = '<span class="badge badge-err">확인 실패</span>'
-        elif is_current:
+        elif checked:
             badge_html = '<span class="badge badge-ok">최신</span>'
+        elif IS_CLOUD:
+            badge_html = '<span class="badge badge-na">DB 기준</span>'
         else:
-            badge_html = '<span class="badge badge-warn">업데이트 필요</span>'
+            badge_html = '<span class="badge badge-na">미확인</span>'
 
-    c1, c2, c3, c4, c5, c6 = st.columns([1.1, 1, 1, 0.9, 1.6, 0.9])
+    c1, c2, c4, c5, c6 = st.columns([1.2, 1, 0.9, 2.2, 1.1])
     with c1:
         st.markdown(f'<div class="status-row"><span class="status-name">{ind}</span></div>', unsafe_allow_html=True)
     with c2:
         st.markdown(f'<div class="status-row"><span class="status-val">{db_disp}</span></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="status-row"><span class="status-val">{expected_disp}</span></div>', unsafe_allow_html=True)
     with c4:
         st.markdown(f'<div class="status-row">{badge_html}</div>', unsafe_allow_html=True)
     with c5:
-        note = RELEASE_NOTE.get(ind, "")
         if error:
-            note = "⚠ 최신월 확인 실패 (정부 서버 응답 지연으로 추정) — '업데이트'로 재시도 가능"
+            note = "⚠ 업데이트 실패 (아래 오류 로그 참고) — 정부 서버 응답이 느릴 뿐이니 잠시 후 다시 시도해보세요"
+        elif checked:
+            note = RELEASE_NOTE.get(ind, "")
+        elif IS_CLOUD:
+            note = RELEASE_NOTE.get(ind, "") + " · 데이터 갱신은 로컬 PC에서 진행 후 push"
+        else:
+            note = RELEASE_NOTE.get(ind, "") + " · '업데이트'를 눌러야 최신 여부를 확인해요"
         st.markdown(f'<div class="status-row"><span class="status-note">{note}</span></div>', unsafe_allow_html=True)
     with c6:
-        btn_label = "🔄 갱신" if ind == "노후도" else "🔄 업데이트"
-        btn_disabled = not st.session_state.is_admin
-        help_text = None if st.session_state.is_admin else "관리자만 클릭할 수 있어요. 위 '관리자 로그인'에서 인증해주세요."
-        clicked = st.button(
-            btn_label, key=f"update_{ind}", use_container_width=True,
-            disabled=btn_disabled,
-            help=help_text
-        )
-        if clicked:
-            with st.spinner(f"{ind} 업데이트 중..."):
-                child_env = os.environ.copy()
-                child_env["PYTHONIOENCODING"] = "utf-8"
-                result = subprocess.run(
-                    [sys.executable, "db_init.py", "--update", ind],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    env=child_env
-                )
-            if result.returncode == 0:
-                status_store.pop(ind, None)  # 이 지표만 저장소에서 제거 → 다음 렌더링 때 이 지표만 새로 확인됨
-                st.cache_data.clear()  # 차트/표용 로컬 DB 조회 캐시는 가벼우니 그냥 전체 새로고침
-                st.session_state["update_error"] = None
-                already_current = "이미 최신 상태" in (result.stdout or "")
-                st.session_state["update_success"] = {"ind": ind, "already_current": already_current}
-                st.rerun()
-            else:
-                st.session_state["update_error"] = {
-                    "ind": ind,
-                    "log": (result.stderr or result.stdout or "(오류 메시지 없음)")
-                }
-                st.rerun()
+        if IS_CLOUD:
+            st.markdown(
+                '<div class="status-row" style="text-align:center">'
+                '<span class="badge badge-na">🔒 읽기 전용</span></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            btn_label = "🔄 갱신" if ind == "노후도" else "🔄 업데이트"
+            btn_disabled = not st.session_state.is_admin
+            help_text = None if st.session_state.is_admin else "관리자만 클릭할 수 있어요. 위 '관리자 로그인'에서 인증해주세요."
+            clicked = st.button(
+                btn_label, key=f"update_{ind}", use_container_width=True,
+                disabled=btn_disabled,
+                help=help_text
+            )
+            if clicked:
+                with st.spinner(f"{ind} 업데이트 중... (정부 서버 응답이 느려 몇 분 걸릴 수 있어요, 잠시만 기다려주세요)"):
+                    child_env = os.environ.copy()
+                    child_env["PYTHONIOENCODING"] = "utf-8"
+                    result = subprocess.run(
+                        [sys.executable, "db_init.py", "--update", ind],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        env=child_env
+                    )
+                if result.returncode == 0:
+                    status_store[ind] = {"db_latest": db_init.get_db_latest(ind), "checked": True, "error": None}
+                    st.cache_data.clear()  # 차트/표용 로컬 DB 조회 캐시는 가벼우니 그냥 전체 새로고침
+                    st.session_state["update_error"] = None
+                    already_current = "이미 최신 상태" in (result.stdout or "")
+                    st.session_state["update_success"] = {"ind": ind, "already_current": already_current}
+                    st.rerun()
+                else:
+                    err_log = result.stderr or result.stdout or "(오류 메시지 없음)"
+                    status_store[ind] = {"db_latest": db_init.get_db_latest(ind), "checked": True, "error": err_log[-200:]}
+                    st.session_state["update_error"] = {"ind": ind, "log": err_log}
+                    st.rerun()
+
 
 if st.session_state.get("update_success"):
     info = st.session_state["update_success"]

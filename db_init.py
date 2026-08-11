@@ -566,6 +566,26 @@ ROLLING_CONFIG = {
     "청약경쟁률":  {"table": "청약경쟁률",  "save": save_청약경쟁률,  "lag_days": 30},
 }
 
+def get_db_latest(indicator):
+    """네트워크 호출 전혀 없이, 로컬 DB에 저장된 최신월(또는 노후도는 최신연도)만 즉시 조회한다.
+    클라우드(읽기전용 모드)에서 페이지가 열릴 때마다 실행되므로, 여긴 절대 네트워크를 타면 안 된다."""
+    if indicator == "노후도":
+        conn = sqlite3.connect("pf_data.db")
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(year) FROM 노후도")
+        val = cur.fetchone()[0]
+        conn.close()
+        return val
+    cfg = ROLLING_CONFIG.get(indicator)
+    if not cfg:
+        return None
+    conn = sqlite3.connect("pf_data.db")
+    cur = conn.cursor()
+    cur.execute(f"SELECT MAX(date) FROM {cfg['table']}")
+    val = cur.fetchone()[0]
+    conn.close()
+    return val
+
 def get_indicator_status(indicator):
     """앱 화면의 상태 테이블용: DB 최신월, 실제 공표된 최신월, 최신여부를 반환.
     네트워크 문제로 확인 자체가 실패하면 error 필드에 사유가 담긴다 (expected는 None)."""
