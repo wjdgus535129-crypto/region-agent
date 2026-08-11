@@ -81,7 +81,7 @@ def init_db():
 
 # ===== 통계누리 API =====
 def fetch_molit(form_id, style_num, start_dt, end_dt, timeout=FETCH_TIMEOUT):
-    url = "http://stat.molit.go.kr/portal/openapi/service/rest/getList.do"
+    url = "https://stat.molit.go.kr/portal/openapi/service/rest/getList.do"
     params = {"key": MOLIT_KEY, "form_id": form_id, "style_num": style_num,
               "start_dt": start_dt, "end_dt": end_dt}
     try:
